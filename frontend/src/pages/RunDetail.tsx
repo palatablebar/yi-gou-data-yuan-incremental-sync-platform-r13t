@@ -6,6 +6,7 @@ import { rejectedApi } from '../api/rejected';
 import { DiffPanel } from '../components/common/DiffPanel';
 import { SampleDataGrid } from '../components/common/SampleDataGrid';
 import { RunStatusPill } from '../components/common/RunStatusPill';
+import { RunScopePanel } from '../components/common/RunScopePanel';
 import { MappingRowEditor } from '../components/common/MappingRowEditor';
 import { useAuthStore } from '../stores/authStore';
 import { useRunPolling } from '../hooks/useRunPolling';
@@ -127,6 +128,14 @@ export const RunDetailPage = () => {
           错误 {run.error_code}：{run.error_message}
         </div>
       )}
+
+      <RunScopePanel
+        scope={run.sync_scope}
+        resume={run.resume_state}
+        counters={run.counters ?? {}}
+        retryCount={run.retry_count}
+        status={run.status}
+      />
 
       <div className="grid grid-cols-1 gap-0 xl:grid-cols-[1.15fr_1fr]">
         <section className="border-b border-r px-4 py-3" style={{ borderColor: 'var(--color-wire)' }}>

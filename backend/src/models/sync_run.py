@@ -32,6 +32,10 @@ class SyncRun(Base):
     rows_skipped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     watermark_from: Mapped[str | None] = mapped_column(String(120), nullable=True)
     watermark_value: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # 本次运行的稳定范围（快照凭证）、断点续跑位置与分类计数，详情页直接渲染
+    sync_scope: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    resume_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    counters: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     stage: Mapped[str] = mapped_column(String(20), nullable=False, default="probe")
     stage_history: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

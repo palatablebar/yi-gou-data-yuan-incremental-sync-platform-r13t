@@ -17,19 +17,25 @@ def staging_table_name(pipeline_id: uuid.UUID) -> str:
     return f"sync_{str(pipeline_id).replace('-', '')[:12]}"
 
 
-def prepare_staging(pipeline_id: uuid.UUID) -> str:
+def prepare_staging(pipeline_id: uuid.UUID, *, reuse: bool = False) -> str:
+    """建 staging 表。
+
+    reuse=True（断点续跑）时保留已有数据，只在表不存在时创建，
+    让上一次尝试已抽取的页不丢失、不重抽。
+    """
     table = staging_table_name(pipeline_id)
     schema = settings.staging_schema
     with engine.begin() as conn:
         conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
-        conn.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{table}"'))
+        if not reuse:
+            conn.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{table}"'))
         conn.execute(
             text(
-                f'CREATE TABLE "{schema}"."{table}" ('
+                f'CREATE TABLE IF NOT EXISTS "{schema}"."{table}" ('
                 " row_index integer, payload jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now())"
             )
         )
-    logger.info("staging prepared table=%s.%s", schema, table)
+    logger.info("staging prepared table=%s.%s reuse=%s", schema, table, reuse)
     return table
 
 
@@ -60,6 +66,38 @@ def count_staging(pipeline_id: uuid.UUID, table: str) -> int:
         return int(
             conn.execute(text(f'SELECT count(*) FROM "{schema}"."{table}"')).scalar_one()
         )
+
+
+def fetch_staging_rows(pipeline_id: uuid.UUID, table: str) -> list[dict[str, Any]]:
+    """续跑时取回此前已落地 staging 的原始行（按 row_index 排序）。"""
+    import json
+
+    schema = settings.staging_schema
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f'SELECT payload FROM "{schema}"."{table}" ORDER BY row_index ASC'
+            )
+        ).all()
+    return [json.loads(row[0]) for row in rows]
+
+
+def fetch_staging_keys(pipeline_id: uuid.UUID, table: str, key_field: str) -> set:
+    """续跑时取回已抽取行的业务键集合，用于跨尝试的重复行判定。"""
+    import json
+
+    schema = settings.staging_schema
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(f'SELECT payload FROM "{schema}"."{table}"')
+        ).all()
+    keys = set()
+    for (raw,) in rows:
+        payload = json.loads(raw)
+        key = payload.get(key_field)
+        if key is not None:
+            keys.add(key)
+    return keys
 
 
 def drop_staging(pipeline_id: uuid.UUID) -> None:

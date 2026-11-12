@@ -3,17 +3,29 @@
 数据是确定性生成的，seed、前端提示与 README 引用的是同一套数值：
 - 基础数据 3 页 × 50 行 = 150 行（order_id 1001..1150）
 - 补推批次 27 行：4 个 order_id 各重复 4 次（12 行冲突）+ 3 行 member_id 为空 + 8 行正常
+
+同步运行通过 create_snapshot() 在开始时冻结一份数据，之后所有分页都带
+snapshot_id 读取同一快照，运行期间上游再新增/改状态/撤回都不会改变本次范围。
 """
 from __future__ import annotations
 
+import json
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
-from src.constants.limits import MOCK_REST_BASE_ROWS, MOCK_REST_FAILURE_EVERY, MOCK_REST_PAGE_SIZE
+from src.constants.limits import (
+    MOCK_REST_BASE_ROWS,
+    MOCK_REST_FAILURE_EVERY,
+    MOCK_REST_PAGE_SIZE,
+    MOCK_REST_SNAPSHOT_TTL_SECONDS,
+)
 from src.utils.redis_client import get_redis
 
 PUSH_FLAG_KEY = "mock:shop_orders:push"
 REQ_COUNTER_KEY = "mock:shop_orders:req"
 RATE_KEY = "mock:shop_orders:rate"
+SNAPSHOT_KEY_PREFIX = "mock:shop_orders:snapshot:"
 
 VALID_MEMBERS = ["M0001", "M0002", "M0003", "M0007", "M0012", "M0031", "M0044", "M0102"]
 CHANNELS = ["mall", "mini", "app"]
@@ -100,8 +112,84 @@ def all_rows() -> list[dict[str, Any]]:
     return rows
 
 
-def paginate(page: int, page_size: int = MOCK_REST_PAGE_SIZE) -> dict[str, Any]:
+def _snapshot_key(snapshot_id: str) -> str:
+    return f"{SNAPSHOT_KEY_PREFIX}{snapshot_id}"
+
+
+def create_snapshot() -> dict[str, Any]:
+    """冻结当前时刻的全量数据到 Redis，返回快照元信息（稳定范围的凭证）。"""
+    snapshot_id = uuid.uuid4().hex
     rows = all_rows()
+    created_at = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "snapshot_id": snapshot_id,
+        "created_at": created_at,
+        "total": len(rows),
+        "total_amount": _sum_amount(rows),
+        "push_batch": push_enabled(),
+        "rows": rows,
+    }
+    client = get_redis()
+    client.set(
+        _snapshot_key(snapshot_id),
+        json.dumps(payload, ensure_ascii=False),
+        ex=MOCK_REST_SNAPSHOT_TTL_SECONDS,
+    )
+    return {
+        "snapshot_id": snapshot_id,
+        "created_at": created_at,
+        "total": len(rows),
+        "total_amount": payload["total_amount"],
+        "push_batch": push_enabled(),
+    }
+
+
+def _sum_amount(rows: list[dict[str, Any]]) -> float:
+    """范围金额合计：用于和目标表同一口径对账（无 amount 字段时返回 0）。"""
+    total = 0.0
+    for row in rows:
+        try:
+            total += float(row.get("amount") or 0)
+        except (TypeError, ValueError):
+            continue
+    return round(total, 2)
+
+
+def get_snapshot(snapshot_id: str) -> dict[str, Any] | None:
+    try:
+        raw = get_redis().get(_snapshot_key(snapshot_id))
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    return json.loads(raw)
+
+
+def touch_snapshot(snapshot_id: str) -> bool:
+    """续跑/翻页时给快照续命，返回快照是否仍然存在。"""
+    try:
+        return bool(get_redis().expire(_snapshot_key(snapshot_id), MOCK_REST_SNAPSHOT_TTL_SECONDS))
+    except Exception:
+        return False
+
+
+def delete_snapshot(snapshot_id: str) -> None:
+    try:
+        get_redis().delete(_snapshot_key(snapshot_id))
+    except Exception:
+        pass
+
+
+def paginate(page: int, page_size: int = MOCK_REST_PAGE_SIZE, snapshot_id: str | None = None) -> dict[str, Any]:
+    if snapshot_id:
+        snapshot = get_snapshot(snapshot_id)
+        if snapshot is None:
+            raise SnapshotExpired(snapshot_id)
+        rows = snapshot["rows"]
+        frozen = True
+    else:
+        rows = all_rows()
+        frozen = False
     total = len(rows)
     page = max(int(page), 1)
     page_size = max(min(int(page_size), 200), 1)
@@ -114,7 +202,17 @@ def paginate(page: int, page_size: int = MOCK_REST_PAGE_SIZE) -> dict[str, Any]:
         "total_pages": total_pages,
         "items": rows[start : start + page_size],
         "push_batch": push_enabled(),
+        "snapshot_id": snapshot_id,
+        "snapshot_frozen": frozen,
     }
+
+
+class SnapshotExpired(Exception):
+    """快照已过期或不存在（Redis 被清空 / 超过 TTL），本次范围无法保证一致性。"""
+
+    def __init__(self, snapshot_id: str) -> None:
+        self.snapshot_id = snapshot_id
+        super().__init__(f"snapshot expired or missing: {snapshot_id}")
 
 
 def should_fail_once() -> bool:

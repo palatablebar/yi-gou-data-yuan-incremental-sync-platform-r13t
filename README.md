@@ -6,7 +6,8 @@
 
 ## 1. 主要功能
 
-- **四类数据源**：CSV 文件、JSONL 日志、PostgreSQL 表（同实例不同 schema）、内置 Mock REST（`/api/mock/rest/shop_orders`，分页 + 限流 + 偶发 5xx）。
+- **四类数据源**：CSV 文件、JSONL 日志、PostgreSQL 表（同实例不同 schema）、内置 Mock REST（`/api/mock/rest/shop_orders`，分页 + 限流 + 偶发 5xx + 运行快照）。
+- **REST 稳定范围与断点续跑**：每次运行先冻结上游快照确定稳定范围，页级 checkpoint 支持失败续跑，业务键去重 + 冲突键 upsert + 拒绝幂等键保证重复执行不重复入账、不误隔离（见 7.1）。
 - **探测**：CSV 探出分隔符/编码/字段清单；PG 表探出列与行数；Mock REST 返回第 1 页样本并提示「共 N 页」；结果写入 `DataSource.status` 与 `last_probed_at`。
 - **映射与七种转换**：`trim` / `upper` / `lower` / `date_format` / `number_cast` / `concat` / `default`，每条映射可选必填、默认值、排序。
 - **全量 / 增量**：增量按管道自己的 `watermark_column` 真实比较并推进水位线，重跑一次即「本批无新数据」。
@@ -110,6 +111,29 @@ cd worker && celery -A worker_src.config.celery_app worker -B -l info
   - 限流：每分钟 120 次，超出返回 429 与 `retry_after`
   - 偶发 5xx：每 9 次请求注入一次 500，用于验证 worker 的退避重试
   - 补推批次开关：`POST /api/mock/rest/shop_orders/push` 开启、`DELETE` 重置
+  - 运行快照：`POST /api/mock/rest/shop_orders/snapshot` 冻结、`GET/DELETE .../snapshot/{id}` 查询/释放
+
+### 7.1 REST 同步的一致性保证（稳定范围 + 断点续跑 + 幂等入账）
+
+电商侧在分页读取期间新增、改状态、撤回订单时，传统「边翻页边读动态总数」会让同一订单跨页重复、
+另一些订单从页间消失，重复行又被 `reject` 策略误判成冲突，最终订单数与金额对不上。本平台对
+Mock REST 管道给出三条保证：
+
+1. **每次运行先确定稳定范围（快照）**：worker 在抽取开始时调 `POST .../snapshot` 冻结当时全量数据
+   （含总行数、金额合计、总页数），凭证 `snapshot_id` 写入 `SyncRun.sync_scope`。此后所有分页都带
+   `snapshot_id` 读同一份冻结数据，运行期间上游再怎么增改撤，本次范围与页边界都不变。
+2. **失败后从断点续跑**：每成功拉取一页，原始行立即追加进 `staging`，并把「下一页」写入
+   `SyncRun.resume_state`（页级 checkpoint）。可重试错误（5xx / 限流 / 内部错误）触发 Celery 重试时，
+   只从 checkpoint 的下一页继续，已落地页不重抽；快照失效（`SNAPSHOT_EXPIRED`）不可重试、快速失败，
+   因为重试也拿不回同一范围。跨尝试用业务键兜底去重，重复行只计入 `duplicate_rows`，绝不变成冲突拒绝。
+3. **重复执行不重复入账、不误隔离**：目标表按冲突键 `ON CONFLICT` 跳过/覆盖/拒绝；
+   `RejectedRecord` 带运行内幂等键（`run_id + 行号 + 原因码`，部分唯一索引），同一运行重试不会产生
+   重复隔离行。再跑一次同一范围，已存在的订单全部走「跳过」而非「拒绝」。
+
+运行详情页（`/runs/:id`）新增「本次运行范围与续跑位置」面板，展示：快照 ID / 冻结时刻 /
+范围行数与页数 / 范围金额合计、当前 checkpoint（下一页、已完成页）、以及每类处理数量
+（抽取、水位线过滤、转换拒绝、写入、跳过、冲突拒绝、快照内重复行等）。校验阶段用账目恒等式
+`抽取 = 过滤 + 转换拒绝 + 写入 + 跳过 + 冲突拒绝` 对账，任何一行没有明确去向都会让校验失败。
 
 ## 8. 技术栈
 

@@ -56,6 +56,11 @@ def replay_records(run_id: str, rejected_ids: list[str], actor_id: str = "", act
                 db.delete(record)
                 run.rows_written = (run.rows_written or 0) + outcome.written
                 run.rows_rejected = max((run.rows_rejected or 0) - 1, 0)
+                # counters 是详情页分类计数的来源，重放后与标量列保持同一口径
+                counters = dict(run.counters or {})
+                counters["rows_written"] = (counters.get("rows_written", 0) or 0) + outcome.written
+                counters["rows_rejected"] = run.rows_rejected
+                run.counters = counters
                 written += outcome.written
                 db.commit()
             else:
@@ -66,6 +71,7 @@ def replay_records(run_id: str, rejected_ids: list[str], actor_id: str = "", act
             db.query(RejectedRecord).filter(RejectedRecord.run_id == run.id).count()
         )
         run.rows_rejected = reloaded
+        run.counters = {**(run.counters or {}), "rows_rejected": reloaded}
         if run.status == RunStatus.PARTIAL.value and reloaded == 0:
             run.status = RunStatus.SUCCEEDED.value
         db.commit()

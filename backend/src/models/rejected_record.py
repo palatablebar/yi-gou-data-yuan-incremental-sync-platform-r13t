@@ -28,5 +28,7 @@ class RejectedRecord(Base):
     reason_code: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     reason_detail: Mapped[str] = mapped_column(Text, nullable=False, default="")
     source_row_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 运行内幂等键：同一次运行对同一来源行的同一拒绝原因只落一条，续跑重试不重复隔离
+    idempotency_key: Mapped[str | None] = mapped_column(String(180), nullable=True, index=True)
     replayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

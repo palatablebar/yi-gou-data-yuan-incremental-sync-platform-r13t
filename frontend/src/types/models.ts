@@ -45,6 +45,43 @@ export interface DataSource {
   referenced_pipelines: SourceRef[];
 }
 
+export interface SyncScope {
+  scope_type: 'upstream_snapshot' | 'static_source';
+  source_type?: SourceType;
+  snapshot_id?: string;
+  frozen_at?: string;
+  total_rows?: number;
+  total_amount?: number;
+  total_pages?: number;
+  page_size?: number;
+  push_batch?: boolean;
+  resumed_from_attempt?: number;
+  cross_attempt_duplicates?: number;
+}
+
+export interface ResumeState {
+  snapshot_id?: string;
+  next_page?: number;
+  pages_fetched?: number;
+  scope?: SyncScope;
+  updated_at?: string;
+}
+
+export interface RunCounters {
+  snapshot_total?: number;
+  pages_total?: number;
+  pages_fetched?: number;
+  duplicate_rows?: number;
+  rows_extracted?: number;
+  rows_filtered?: number;
+  rows_read?: number;
+  rows_transform_failed?: number;
+  rows_written?: number;
+  rows_skipped?: number;
+  rows_conflict_rejected?: number;
+  rows_rejected?: number;
+}
+
 export interface SyncRunBrief {
   id: string;
   pipeline_id: string;
@@ -60,6 +97,9 @@ export interface SyncRunBrief {
   watermark_from: string | null;
   watermark_value: string | null;
   watermark_text: string;
+  sync_scope: SyncScope | null;
+  resume_state: ResumeState | null;
+  counters: RunCounters;
   stage: Stage;
   stage_history: { stage: string; label?: string; at: string }[];
   error_message: string | null;

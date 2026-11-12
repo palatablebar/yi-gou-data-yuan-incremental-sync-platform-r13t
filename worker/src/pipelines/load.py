@@ -1,4 +1,4 @@
-"""写入：staging 落地 → 目标表按冲突策略 upsert。"""
+"""写入：目标表按冲突策略 upsert（staging 落地由 sync_task 在抽取阶段统一完成）。"""
 from __future__ import annotations
 
 import uuid
@@ -7,14 +7,8 @@ from typing import Any
 from src.config.database import session_scope
 from src.services import load_service
 from src.utils.logger import get_logger
-from worker_src.core import storage
 
 logger = get_logger("syncmesh.worker.load")
-
-
-def write_staging(pipeline_id: uuid.UUID, table: str, records: list[dict[str, Any]]) -> int:
-    clean = [{k: v for k, v in record.items() if not k.startswith("__")} for record in records]
-    return storage.write_staging(pipeline_id, table, clean)
 
 
 def load_to_target(

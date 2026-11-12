@@ -15,6 +15,7 @@ from src.constants.messages import CONFLICT_STRATEGY_HELP, EMPTY_STATES, RUN_STA
 from src.constants.roles import ROLE_LABELS
 from src.constants.transforms import TRANSFORM_PARAM_SPECS
 from src.utils import mock_rest
+from src.utils.errors import AppError
 from src.utils.redis_client import get_redis, redis_ping
 
 
@@ -67,8 +68,13 @@ def mock_shop_orders(
     request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
+    snapshot_id: str | None = Query(default=None),
 ) -> JSONResponse:
-    """内置 Mock REST：分页 + 限流 + 偶发 500（用于验证 worker 的重试退避链路）。"""
+    """内置 Mock REST：分页 + 限流 + 偶发 500（用于验证 worker 的重试退避链路）。
+
+    带 snapshot_id 时读取运行开始时冻结的快照，页边界与总数在整个运行期间稳定，
+    上游新增/改状态/撤回不会造成跨页漂移（重复出现或消失）。
+    """
     if not _mock_rate_limit(request):
         return JSONResponse(
             status_code=429,
@@ -88,10 +94,42 @@ def mock_shop_orders(
                 "detail": "injected failure every 9th request",
             },
         )
-    payload = mock_rest.paginate(page, page_size)
+    try:
+        payload = mock_rest.paginate(page, page_size, snapshot_id=snapshot_id)
+    except mock_rest.SnapshotExpired:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": codes.SNAPSHOT_EXPIRED,
+                "message": "同步快照已过期或不存在，本次运行的数据范围无法保证一致性",
+                "detail": f"snapshot_id={snapshot_id}",
+            },
+        )
     payload["endpoint"] = "/api/mock/rest/shop_orders"
     payload["has_next"] = page < payload["total_pages"]
     return JSONResponse(status_code=200, content=payload)
+
+
+def mock_create_snapshot() -> dict:
+    return mock_rest.create_snapshot()
+
+
+def mock_snapshot_state(snapshot_id: str) -> dict:
+    snapshot = mock_rest.get_snapshot(snapshot_id)
+    if snapshot is None:
+        raise AppError(codes.SNAPSHOT_EXPIRED, "快照不存在或已过期", f"snapshot_id={snapshot_id}")
+    return {
+        "snapshot_id": snapshot["snapshot_id"],
+        "created_at": snapshot["created_at"],
+        "total": snapshot["total"],
+        "total_amount": snapshot.get("total_amount", 0),
+        "push_batch": snapshot["push_batch"],
+    }
+
+
+def mock_delete_snapshot(snapshot_id: str) -> dict:
+    mock_rest.delete_snapshot(snapshot_id)
+    return {"snapshot_id": snapshot_id, "deleted": True}
 
 
 def mock_push_state() -> dict:
